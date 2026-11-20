@@ -1,0 +1,17 @@
+db/
+incremental_db/
+output_files/
+simulation/
+*.rdr
+*.flock
+*.qws
+*.bak
+*.rpt
+*.summary
+*.smsg
+*.done
+*.jdi
+*.pin
+*.sof
+*.pof
+*.cdf
