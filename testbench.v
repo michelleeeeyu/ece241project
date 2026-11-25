@@ -5,21 +5,23 @@
 //
 //  What it does:
 //    1. Holds KEY[0] low to reset, then releases it.
-//    2. Presses KEY[3] (go) briefly to start drawing the 50x50 box.
+//    2. Presses KEY[3] (go) briefly to start drawing the 32x32 template.
 //    3. Waits for the FSM to return to state A (drawing finished).
 //    4. Checks:
-//         - total pixels written by the FSM     (expect 50*50 = 2500)
-//         - outline pixels counted (pixel_write) (expect 4*50-4 = 196)
-//         - BCD counter digits d4..d0            (expect 0 0 1 9 6)
-//         - HEX4..HEX0 segment patterns match those digits
-//         - every x/y sent to the VGA adapter is a known value and lies
-//           inside the box centred at (160,120)
+//         - template pixels read by the FSM     (expect 32*32 = 1024)
+//         - pixels drawn (pixel_write)          (expect the non-transparent
+//                                                pixels of the template)
+//         - BCD counter digits d4..d0 and HEX4..HEX0 show that count
+//         - every pixel sent to the VGA adapter lies inside the template
+//           area centred at (160,120) and has the template's color for that
+//           position (i.e. address, color and write are lined up)
 //
-//  The real vga_adapter uses Altera megafunctions (altsyncram/altpll).
-//  By default this file provides a lightweight behavioural stand-in so
-//  you don't need the altera_mf library. To simulate with the real
-//  adapter instead, compile with +define+USE_REAL_VGA and add the
-//  altera_mf library (vsim -L altera_mf_ver ...).
+//  The real vga_adapter and object_mem use Altera megafunctions (altsyncram/
+//  altpll). By default this file provides lightweight behavioural stand-ins
+//  so you don't need the altera_mf library; the stand-in object_mem holds a
+//  test pattern instead of the MIF. To simulate with the real modules
+//  instead, compile with +define+USE_REAL_VGA, add object_mem.v and the
+//  vga_adapter files, and add the altera_mf library (vsim -L altera_mf_ver).
 // ============================================================================
 
 module testbench;
@@ -44,38 +46,54 @@ module testbench;
     always #10 CLOCK_50 = ~CLOCK_50;
 
     // ---------------- expected values ----------------
-    localparam SIZE        = 50;
+    localparam SIZE        = 32;
     localparam XC_CENTER   = 160;
     localparam YC_CENTER   = 120;
-    localparam EXP_WRITES  = SIZE * SIZE;      // 2500
-    localparam EXP_OUTLINE = 4 * SIZE - 4;     // 196
+    localparam X0          = XC_CENTER - SIZE/2;   // top-left corner of template
+    localparam Y0          = YC_CENTER - SIZE/2;
+    localparam EXP_READS   = SIZE * SIZE;      // 1024
+    integer    exp_drawn;                      // non-transparent template pixels
+    integer    k;
+
+    initial begin
+        exp_drawn = 0;
+        for (k = 0; k < SIZE*SIZE; k = k + 1)
+            if (DUT.OM.mem[k] !== DUT.TRANSPARENT) exp_drawn = exp_drawn + 1;
+    end
 
     // ---------------- monitors ----------------
-    integer write_count   = 0;
-    integer outline_count = 0;
+    integer read_count    = 0;
+    integer drawn_count   = 0;
     integer bad_xy        = 0;
+    integer bad_color     = 0;
     integer errors        = 0;
 
-    // coordinates as the DUT drives them into the VGA adapter
+    // pixels as the DUT drives them into the VGA adapter
     wire [9:0] vga_x = DUT.VGA.x;
     wire [8:0] vga_y = DUT.VGA.y;
+    wire [8:0] vga_c = DUT.VGA.color;
 
     always @(posedge CLOCK_50) begin
-        if (KEY[0] && DUT.write) begin
-            write_count = write_count + 1;
-            if (DUT.pixel_write) outline_count = outline_count + 1;
+        if (KEY[0] && DUT.write) read_count = read_count + 1;
+
+        if (KEY[0] && DUT.VGA.write) begin
+            drawn_count = drawn_count + 1;
 
             if ((^vga_x === 1'bx) || (^vga_y === 1'bx)) begin
                 if (bad_xy < 5)
-                    $display("[%0t] ERROR: unknown VGA coordinate x=%b y=%b (XC=%0d YC=%0d)",
-                             $time, vga_x, vga_y, DUT.XC, DUT.YC);
+                    $display("[%0t] ERROR: unknown VGA coordinate x=%b y=%b", $time, vga_x, vga_y);
                 bad_xy = bad_xy + 1;
             end
-            else if (vga_x <  XC_CENTER - SIZE/2 || vga_x >= XC_CENTER + SIZE/2 ||
-                     vga_y <  YC_CENTER - SIZE/2 || vga_y >= YC_CENTER + SIZE/2) begin
+            else if (vga_x < X0 || vga_x >= X0 + SIZE || vga_y < Y0 || vga_y >= Y0 + SIZE) begin
                 if (bad_xy < 5)
-                    $display("[%0t] ERROR: pixel (%0d,%0d) outside expected box", $time, vga_x, vga_y);
+                    $display("[%0t] ERROR: pixel (%0d,%0d) outside template area", $time, vga_x, vga_y);
                 bad_xy = bad_xy + 1;
+            end
+            else if (vga_c !== DUT.OM.mem[(vga_y - Y0) * SIZE + (vga_x - X0)]) begin
+                if (bad_color < 5)
+                    $display("[%0t] ERROR: pixel (%0d,%0d) color %h, template has %h", $time,
+                             vga_x, vga_y, vga_c, DUT.OM.mem[(vga_y - Y0) * SIZE + (vga_x - X0)]);
+                bad_color = bad_color + 1;
             end
         end
     end
@@ -116,7 +134,7 @@ module testbench;
         repeat (5) @(posedge CLOCK_50);
 
         // press and release KEY[3] (go)
-        $display("[%0t] Pressing KEY[3] to draw box", $time);
+        $display("[%0t] Pressing KEY[3] to draw template", $time);
         @(negedge CLOCK_50) KEY[3] = 1'b0;
         repeat (3) @(posedge CLOCK_50);
         @(negedge CLOCK_50) KEY[3] = 1'b1;
@@ -130,17 +148,18 @@ module testbench;
 
         // ---------------- results ----------------
         $display("\n=========== RESULTS ===========");
-        check("pixels written (write)",        write_count,   EXP_WRITES);
-        check("outline pixels (pixel_write)",  outline_count, EXP_OUTLINE);
+        check("template pixels read (write)",  read_count,    EXP_READS);
+        check("pixels drawn (pixel_write)",    drawn_count,   exp_drawn);
         check("BCD value d4..d0",
               DUT.d4*10000 + DUT.d3*1000 + DUT.d2*100 + DUT.d1*10 + DUT.d0,
-              EXP_OUTLINE);
-        check("HEX4 segments ok", HEX4 === seg(0), 1);
-        check("HEX3 segments ok", HEX3 === seg(0), 1);
-        check("HEX2 segments ok", HEX2 === seg(1), 1);
-        check("HEX1 segments ok", HEX1 === seg(9), 1);
-        check("HEX0 segments ok", HEX0 === seg(6), 1);
+              exp_drawn);
+        check("HEX4 segments ok", HEX4 === seg(exp_drawn / 10000 % 10), 1);
+        check("HEX3 segments ok", HEX3 === seg(exp_drawn / 1000 % 10), 1);
+        check("HEX2 segments ok", HEX2 === seg(exp_drawn / 100 % 10), 1);
+        check("HEX1 segments ok", HEX1 === seg(exp_drawn / 10 % 10), 1);
+        check("HEX0 segments ok", HEX0 === seg(exp_drawn % 10), 1);
         check("bad/unknown VGA coordinates",   bad_xy,        0);
+        check("pixels with wrong color",       bad_color,     0);
 
         if (errors == 0) $display("\n*** ALL TESTS PASSED ***\n");
         else             $display("\n*** %0d TEST(S) FAILED ***\n", errors);
@@ -185,5 +204,30 @@ module vga_adapter (resetn, clock, color, x, y, write,
     assign VGA_HS = 1'b1; assign VGA_VS = 1'b1;
     assign VGA_BLANK_N = 1'b1; assign VGA_SYNC_N = 1'b0;
     assign VGA_CLK = clock;
+endmodule
+
+// ============================================================================
+//  Behavioural stand-in for object_mem (simulation only).
+//  Same ports and 1-clock read latency as the altsyncram ROM in object_mem.v.
+//  Instead of the MIF it holds a test pattern in which every 5th pixel is
+//  transparent (0) and the others have a color that depends on the address.
+// ============================================================================
+module object_mem (address, clock, q);
+    parameter n = 9;
+    parameter Mn = 10;
+    parameter INIT_FILE = "";
+
+    input  wire [Mn-1:0] address;
+    input  wire clock;
+    output reg  [n-1:0] q;
+
+    reg [n-1:0] mem [0:(1<<Mn)-1];
+    integer i;
+    initial
+        for (i = 0; i < (1<<Mn); i = i + 1)
+            mem[i] = (i % 5 == 0) ? {n{1'b0}} : ((i * 37) % ((1<<n) - 1)) + 1;
+
+    always @(posedge clock)
+        q <= mem[address];
 endmodule
 `endif

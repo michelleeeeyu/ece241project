@@ -5,8 +5,11 @@ VGA adapter's BACKGROUND_IMAGE.
 
 Usage:
     python3 img2mif.py input.png output.mif [--res 640x480] [--depth 9]
+    python3 img2mif.py sprite.png template.mif --size 32x32
 
   --res    VGA adapter RESOLUTION: 640x480 (default), 320x240 or 160x120
+  --size   any WIDTHxHEIGHT instead of --res, e.g. for an object/template memory
+           (object_mem needs a power-of-2 width, such as 16x16 or 32x32)
   --depth  VGA adapter COLOR_DEPTH: 3, 6, 9 (default), 12, ... (multiple of 3)
 
 The image is resized to fit the resolution (stretched; crop it beforehand if
@@ -34,6 +37,7 @@ def main():
     ap.add_argument("output", help="output .mif file")
     ap.add_argument("--res", default="640x480", choices=RESOLUTIONS.keys(),
                     help="VGA adapter RESOLUTION (default 640x480)")
+    ap.add_argument("--size", help="output size WIDTHxHEIGHT, overrides --res (e.g. 32x32)")
     ap.add_argument("--depth", type=int, default=9,
                     help="VGA adapter COLOR_DEPTH, a multiple of 3 (default 9)")
     args = ap.parse_args()
@@ -42,6 +46,11 @@ def main():
         sys.exit("error: --depth must be a multiple of 3 between 3 and 24")
     bits = args.depth // 3
     cols, rows = RESOLUTIONS[args.res]
+    if args.size:
+        try:
+            cols, rows = (int(v) for v in args.size.lower().split("x"))
+        except ValueError:
+            sys.exit("error: --size must look like 32x32")
 
     img = Image.open(args.input).convert("RGB")
     if img.size != (cols, rows):

@@ -1,13 +1,14 @@
 /*
- *  This code serves as an example that illustrates usage of the VGA output in the DE1-SoC 
- *  board. The code uses a VGA adapter to send pixel colors to the VGA display. To use the demo 
- *  first press KEY[0] to reset the circuit. It will display the contents of a video memory
- *  in the VGA adapter as a background image. Then, the user can choose to draw a colored box
- *  that is centered in the VGA display, by pressing KEY[3]. The box color is displayed on 
- *  LEDR[8:0], and the size of the box is displayed as a hexadecimal number on HEX1-0. You can
- *  set the color of the box by specifying any 9-bit color on switches SW[8:0] and then pressing
- *  KEY[1]. You can set the size of the box by specifying a new size on the SW switches and then
- *  pressing KEY[2]. Press KEY[3] to draw the box.
+ *  This code illustrates usage of the VGA output in the DE1-SoC board. The code uses a VGA
+ *  adapter to send pixel colors to the VGA display. To use the demo first press KEY[0] to
+ *  reset the circuit. It will display the contents of a video memory in the VGA adapter as a
+ *  background image. Then press KEY[3] to draw the template image, which is read pixel by
+ *  pixel from a small memory (object_mem, loaded from a MIF file) and drawn centered at
+ *  (X_OFFSET, Y_OFFSET).
+ *
+ *  Pixels of the template whose color is TRANSPARENT are skipped, so the background shows
+ *  through them. Every pixel that is actually drawn is counted, and the count is shown as a
+ *  decimal number on HEX4-0.
  *
 */
 module square_test(CLOCK_50, KEY, HEX4, HEX3, HEX2, HEX1, HEX0, VGA_R, VGA_G, VGA_B,
@@ -18,10 +19,17 @@ module square_test(CLOCK_50, KEY, HEX4, HEX3, HEX2, HEX1, HEX0, VGA_R, VGA_G, VG
     // specify the number of bits needed for a Y (row) pixel coordinate on the VGA display
     parameter nY = 9;
 
-    // state codes for FSM that choses which object to draw at a given time
+    // state codes for FSM that draws the template
     parameter A = 2'b00, B = 2'b01, C = 2'b10, D = 2'b11;
-	 
-	 localparam RESOLUTION = "320x240"; 
+
+    // template size is 2^xOBJ x 2^yOBJ pixels (must be powers of 2, and must match the MIF)
+    parameter xOBJ = 5, yOBJ = 5;
+    parameter SIZE_X = 1 << xOBJ;
+    parameter SIZE_Y = 1 << yOBJ;
+    parameter TEMPLATE_FILE = "./MIF/template_32x32_9.mif";
+
+    // template pixels of this color are not drawn (and not counted)
+    parameter TRANSPARENT = 9'b000_000_000;
 	
     input CLOCK_50;    
     input [3:0] KEY;
@@ -35,28 +43,26 @@ module square_test(CLOCK_50, KEY, HEX4, HEX3, HEX2, HEX1, HEX0, VGA_R, VGA_G, VG
     output VGA_SYNC_N;
     output VGA_CLK;    
     
-    wire [8:0] color;
-    wire [nX-1:0] X;    // used to record the center of the box
-    wire [nY-1:0] Y;    // used to record the center of the box
-    wire [nY-1:0] size;
-    wire [nX-1:0] XC;           // box offsets and counters
-    wire [nY-1:0] YC;
+    wire [8:0] obj_color;           // template pixel color, read from memory
+    wire [nX-1:0] X;                // used to record the center of the template
+    wire [nY-1:0] Y;                // used to record the center of the template
+    wire [nX-1:0] XC;               // template column counter
+    wire [nY-1:0] YC;               // template row counter
     wire go;                        // used by FSM
-    reg write, Lxc, Lyc, Exc, Eyc;  // box control signals
+    reg write, Lxc, Lyc, Exc, Eyc;  // control signals
     reg [1:0] y_Q, Y_D;             // FSM
-	 wire on_edge;
-	 wire pixel_write;
+    wire [nX-1:0] VGA_x;            // (x,y) and write, delayed by one clock cycle to line
+    wire [nY-1:0] VGA_y;            // up with the pixel color coming out of the memory
+    wire VGA_write;
+    wire pixel_write;               // a template pixel is actually drawn
     
-    // use offsets to center the box on the VGA display
+    // use offsets to center the template on the VGA display
     parameter X_OFFSET = 160;
     parameter Y_OFFSET = 120;
     assign X = X_OFFSET;
     assign Y = Y_OFFSET;
 
-    assign color = 9'b111_101_110;
-	 assign size = 8'd50;
-
-    // these counter are used to generate pixel coordinates for the box
+    // these counters are used to generate pixel coordinates for the template
     Up_count U1 ({nX{1'd0}}, CLOCK_50, KEY[0], Lxc, Exc, XC);
         defparam U1.n = nX;
     Up_count U2 ({nY{1'd0}}, CLOCK_50, KEY[0], Lyc, Eyc, YC);
@@ -69,9 +75,9 @@ module square_test(CLOCK_50, KEY, HEX4, HEX3, HEX2, HEX1, HEX0, VGA_R, VGA_G, VG
         case (y_Q)
             A:  if (!go) Y_D = A;
                 else Y_D = B;
-            B:  if (XC != size-1) Y_D = B;  // box x coordinate (column)
+            B:  if (XC != SIZE_X-1) Y_D = B;    // template x coordinate (column)
                 else Y_D = C;
-            C:  if (YC != size-1) Y_D = B;  // box y coordinate (row)
+            C:  if (YC != SIZE_Y-1) Y_D = B;    // template y coordinate (row)
                 else Y_D = D;
             D:  Y_D = A;
         endcase
@@ -82,7 +88,7 @@ module square_test(CLOCK_50, KEY, HEX4, HEX3, HEX2, HEX1, HEX0, VGA_R, VGA_G, VG
         write = 1'b0; Lxc = 1'b0; Lyc = 1'b0; Exc = 1'b0; Eyc = 1'b0;
         case (y_Q)
             A:  begin Lxc = 1'b1; Lyc = 1'b1; end   // load (XC,YC) counter
-            B:  begin Exc = 1'b1; write = 1'b1; end // enable XC, write pixel
+            B:  begin Exc = 1'b1; write = 1'b1; end // enable XC, read/write pixel
             C:  begin Lxc = 1'b1; Eyc = 1'b1; end   // enable YC, load XC
             D:  Lyc = 1'b1;                         // load YC
         endcase
@@ -93,9 +99,27 @@ module square_test(CLOCK_50, KEY, HEX4, HEX3, HEX2, HEX1, HEX0, VGA_R, VGA_G, VG
             y_Q <= 2'b0;
         else
             y_Q <= Y_D;
-				
-	assign on_edge = (XC == 0) | (YC == 0) | (XC == size - 1) | (YC == size - 1);
-	assign pixel_write = write & on_edge;
+
+    // template memory. The address is {row, column}, which works because the template width
+    // is a power of 2. The pixel color appears on obj_color one clock cycle later
+    object_mem OM ({YC[yOBJ-1:0], XC[xOBJ-1:0]}, CLOCK_50, obj_color);
+        defparam OM.n = 9;
+        defparam OM.Mn = xOBJ + yOBJ;
+        defparam OM.INIT_FILE = TEMPLATE_FILE;
+
+    // compute the screen location of the current pixel (centered at (X,Y)) and register it,
+    // together with write, so that they stay synchronized with the memory's output
+    wire [nX-1:0] half_x = SIZE_X >> 1;
+    wire [nY-1:0] half_y = SIZE_Y >> 1;
+    regn RX (X - half_x + XC, KEY[0], 1'b1, CLOCK_50, VGA_x);
+        defparam RX.n = nX;
+    regn RY (Y - half_y + YC, KEY[0], 1'b1, CLOCK_50, VGA_y);
+        defparam RY.n = nY;
+    regn RW (write, KEY[0], 1'b1, CLOCK_50, VGA_write);
+        defparam RW.n = 1;
+
+    // draw (and count) only the pixels of the template that are not transparent
+    assign pixel_write = VGA_write & (obj_color != TRANSPARENT);
 	
 	wire clear_count = (y_Q == A) & go;
 	wire[3:0] d4, d3, d2, d1, d0;
@@ -111,9 +135,9 @@ module square_test(CLOCK_50, KEY, HEX4, HEX3, HEX2, HEX1, HEX0, VGA_R, VGA_G, VG
     vga_adapter VGA (
         .resetn(KEY[0]),
         .clock(CLOCK_50),
-        .color(color),
-        .x(X - (size >> 1) + XC),
-        .y(Y - (size >> 1) + YC),
+        .color(obj_color),
+        .x(VGA_x),
+        .y(VGA_y),
         .write(pixel_write),
         .VGA_R(VGA_R),
         .VGA_G(VGA_G),
