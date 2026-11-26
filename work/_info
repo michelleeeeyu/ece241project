@@ -1,0 +1,158 @@
+m255
+K4
+z2
+13
+!s112 1.1
+!i10d 8192
+!i10e 25
+!i10f 100
+cModel Technology
+dC:/intelFPGA_lite/18.1/project
+vbcd_count5
+Z0 !s110 1795677764
+!i10b 1
+!s100 Y2?mC^[h8h`:G6hQ?FIJ:1
+IC:bazC^fk9KDhCTQVG7J]3
+Z1 VDg1SIo80bB@j0V0VzS_@n1
+Z2 dC:/Users/miche/Documents/projects/ece241
+Z3 w1795677100
+Z4 8C:/Users/miche/Documents/projects/ece241/square_test.v
+Z5 FC:/Users/miche/Documents/projects/ece241/square_test.v
+L0 288
+Z6 OV;L;10.5b;63
+r1
+!s85 0
+31
+Z7 !s108 1795677764.000000
+Z8 !s107 C:/Users/miche/Documents/projects/ece241/square_test.v|
+Z9 !s90 -reportprogress|300|-work|work|-stats=none|C:/Users/miche/Documents/projects/ece241/square_test.v|
+!i113 1
+Z10 o-work work
+Z11 tCvgOpt 0
+vhex7seg
+R0
+!i10b 1
+!s100 bT`Zdo]EHNcm:g`hDl^9U0
+I_m;HUR7`@]oE0XY05UAXn2
+R1
+R2
+R3
+R4
+R5
+L0 323
+R6
+r1
+!s85 0
+31
+R7
+R8
+R9
+!i113 1
+R10
+R11
+vobject_mem
+R0
+!i10b 1
+!s100 2Sk3h183[2]LoiiK?JhB_2
+ICZ:6b>?Lgz``X^5BV5c[>1
+R1
+R2
+w1795130066
+8C:/Users/miche/Downloads/DE1-SoC/DE1-SoC/object/object_mem.v
+FC:/Users/miche/Downloads/DE1-SoC/DE1-SoC/object/object_mem.v
+L0 1
+R6
+r1
+!s85 0
+31
+R7
+!s107 C:/Users/miche/Downloads/DE1-SoC/DE1-SoC/object/object_mem.v|
+!s90 -reportprogress|300|-work|work|-stats=none|C:/Users/miche/Downloads/DE1-SoC/DE1-SoC/object/object_mem.v|
+!i113 1
+R10
+R11
+vregn
+R0
+!i10b 1
+!s100 >:9QizlcCQZAAH]N62WH10
+IX4BCHAEPfQOF;c>0S2DYn1
+R1
+R2
+R3
+R4
+R5
+L0 259
+R6
+r1
+!s85 0
+31
+R7
+R8
+R9
+!i113 1
+R10
+R11
+vsquare_test
+R0
+!i10b 1
+!s100 DNRh=ED5]fB]Ql[=8ODDV1
+IJT7<YH41A78>TRbh^0N423
+R1
+R2
+R3
+R4
+R5
+L0 13
+R6
+r1
+!s85 0
+31
+R7
+R8
+R9
+!i113 1
+R10
+R11
+vsquare_test_game_tb
+R0
+!i10b 1
+!s100 HkUE3dgc]dRT>cc>4HmnR0
+IY=USea^1z;a]O>ddFK0dU2
+R1
+R2
+w1795676886
+8C:/Users/miche/Documents/projects/ece241/testbench.v
+FC:/Users/miche/Documents/projects/ece241/testbench.v
+L0 24
+R6
+r1
+!s85 0
+31
+R7
+!s107 C:/Users/miche/Documents/projects/ece241/testbench.v|
+!s90 -reportprogress|300|-work|work|-stats=none|C:/Users/miche/Documents/projects/ece241/testbench.v|
+!i113 1
+R10
+R11
+vUp_count
+R0
+!i10b 1
+!s100 _00di5Z>E>9MKBhH@0IZI1
+I4jcEVNN_zMN@c;@l8:R:b2
+R1
+R2
+R3
+R4
+R5
+L0 273
+R6
+r1
+!s85 0
+31
+R7
+R8
+R9
+!i113 1
+R10
+R11
+n@up_count
