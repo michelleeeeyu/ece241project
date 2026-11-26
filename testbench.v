@@ -4,17 +4,17 @@
 //  testbench.v  --  ModelSim testbench for square_test
 //
 //  What it does:
-//    1. Holds KEY[0] low to reset, then releases it.
-//    2. Presses KEY[3] (go) briefly to start drawing the 32x32 template.
-//    3. Waits for the FSM to return to state A (drawing finished).
-//    4. Checks:
+//    1. Fills the (stand-in) screen with old pixels, then resets with KEY[0]
+//       and checks that the whole screen is cleared to CLEAR_COLOR.
+//    2. Presses KEY[3] (go) to draw the 32x32 template and checks:
 //         - template pixels read by the FSM     (expect 32*32 = 1024)
-//         - pixels drawn (pixel_write)          (expect the non-transparent
+//         - pixels drawn                        (expect the non-transparent
 //                                                pixels of the template)
 //         - BCD counter digits d4..d0 and HEX4..HEX0 show that count
-//         - every pixel sent to the VGA adapter lies inside the template
-//           area centred at (160,120) and has the template's color for that
-//           position (i.e. address, color and write are lined up)
+//         - every drawn pixel lies inside the template area centred at
+//           (320,240) and has the template's color for that position
+//           (i.e. address, color and write are lined up)
+//    3. Resets again and checks the template is erased and the count is 0.
 //
 //  The real vga_adapter and object_mem use Altera megafunctions (altsyncram/
 //  altpll). By default this file provides lightweight behavioural stand-ins
@@ -46,12 +46,15 @@ module testbench;
     always #10 CLOCK_50 = ~CLOCK_50;
 
     // ---------------- expected values ----------------
+    localparam COLS        = 640;
+    localparam ROWS        = 480;
     localparam SIZE        = 32;
-    localparam XC_CENTER   = 160;
-    localparam YC_CENTER   = 120;
+    localparam XC_CENTER   = 320;
+    localparam YC_CENTER   = 240;
     localparam X0          = XC_CENTER - SIZE/2;   // top-left corner of template
     localparam Y0          = YC_CENTER - SIZE/2;
     localparam EXP_READS   = SIZE * SIZE;      // 1024
+    localparam ST_A = 3'b010, ST_D = 3'b101;   // FSM states (idle, done drawing)
     integer    exp_drawn;                      // non-transparent template pixels
     integer    k;
 
@@ -64,6 +67,7 @@ module testbench;
     // ---------------- monitors ----------------
     integer read_count    = 0;
     integer drawn_count   = 0;
+    integer clear_count   = 0;
     integer bad_xy        = 0;
     integer bad_color     = 0;
     integer errors        = 0;
@@ -74,9 +78,14 @@ module testbench;
     wire [8:0] vga_c = DUT.VGA.color;
 
     always @(posedge CLOCK_50) begin
-        if (KEY[0] && DUT.write) read_count = read_count + 1;
+        if (KEY[0] && DUT.write && !DUT.clearing) read_count = read_count + 1;
 
-        if (KEY[0] && DUT.VGA.write) begin
+        if (KEY[0] && DUT.VGA.write && DUT.VGA_clearing) begin
+            clear_count = clear_count + 1;
+            if (vga_c !== DUT.CLEAR_COLOR) bad_color = bad_color + 1;
+        end
+
+        if (KEY[0] && DUT.VGA.write && !DUT.VGA_clearing) begin
             drawn_count = drawn_count + 1;
 
             if ((^vga_x === 1'bx) || (^vga_y === 1'bx)) begin
@@ -97,6 +106,27 @@ module testbench;
             end
         end
     end
+
+    // number of screen pixels that are not CLEAR_COLOR
+    function integer dirty_pixels;
+        input dummy;
+        integer i;
+        begin
+            dirty_pixels = 0;
+            for (i = 0; i < COLS*ROWS; i = i + 1)
+                if (DUT.VGA.fb[i] !== DUT.CLEAR_COLOR) dirty_pixels = dirty_pixels + 1;
+        end
+    endfunction
+
+    task do_reset;
+        begin
+            @(negedge CLOCK_50) KEY[0] = 1'b0;
+            repeat (5) @(posedge CLOCK_50);
+            @(negedge CLOCK_50) KEY[0] = 1'b1;
+            wait (DUT.y_Q == ST_A);           // screen clear finished
+            repeat (5) @(posedge CLOCK_50);
+        end
+    endtask
 
     // ---------------- 7-segment decode for checking ----------------
     function [6:0] seg;
@@ -127,29 +157,31 @@ module testbench;
     initial begin
         KEY = 4'b1111;              // all keys released (active-low)
 
-        // reset
-        KEY[0] = 1'b0;
-        repeat (5) @(posedge CLOCK_50);
-        KEY[0] = 1'b1;
-        repeat (5) @(posedge CLOCK_50);
+        // pretend an old picture is on the screen (e.g. an object drawn before reset)
+        for (k = 0; k < COLS*ROWS; k = k + 1) DUT.VGA.fb[k] = 9'h1FF;
 
-        // press and release KEY[3] (go)
+        // ---- reset: whole screen must be cleared ----
+        $display("[%0t] Pressing KEY[0] (reset)", $time);
+        do_reset;
+        $display("\n=========== RESET 1 ===========");
+        check("screen pixels cleared",         clear_count,      COLS*ROWS);
+        check("pixels left uncleared",         dirty_pixels(0),  0);
+        check("pixel count after reset",
+              DUT.d4*10000 + DUT.d3*1000 + DUT.d2*100 + DUT.d1*10 + DUT.d0, 0);
+
+        // ---- draw the template ----
         $display("[%0t] Pressing KEY[3] to draw template", $time);
         @(negedge CLOCK_50) KEY[3] = 1'b0;
         repeat (3) @(posedge CLOCK_50);
         @(negedge CLOCK_50) KEY[3] = 1'b1;
-
-        // wait for FSM to reach D, then return to A
-        wait (DUT.y_Q == 2'b11);
-        @(posedge CLOCK_50);
-        wait (DUT.y_Q == 2'b00);
+        wait (DUT.y_Q == ST_D);
+        wait (DUT.y_Q == ST_A);
         repeat (5) @(posedge CLOCK_50);
         $display("[%0t] Drawing finished", $time);
 
-        // ---------------- results ----------------
-        $display("\n=========== RESULTS ===========");
-        check("template pixels read (write)",  read_count,    EXP_READS);
-        check("pixels drawn (pixel_write)",    drawn_count,   exp_drawn);
+        $display("\n=========== DRAW ===========");
+        check("template pixels read",          read_count,    EXP_READS);
+        check("pixels drawn",                  drawn_count,   exp_drawn);
         check("BCD value d4..d0",
               DUT.d4*10000 + DUT.d3*1000 + DUT.d2*100 + DUT.d1*10 + DUT.d0,
               exp_drawn);
@@ -160,6 +192,18 @@ module testbench;
         check("HEX0 segments ok", HEX0 === seg(exp_drawn % 10), 1);
         check("bad/unknown VGA coordinates",   bad_xy,        0);
         check("pixels with wrong color",       bad_color,     0);
+        check("template pixels on screen",     dirty_pixels(0), exp_drawn);
+
+        // ---- reset again: template must be erased ----
+        $display("[%0t] Pressing KEY[0] (reset)", $time);
+        clear_count = 0;
+        do_reset;
+        $display("\n=========== RESET 2 ===========");
+        check("screen pixels cleared",         clear_count,      COLS*ROWS);
+        check("pixels left uncleared",         dirty_pixels(0),  0);
+        check("pixel count after reset",
+              DUT.d4*10000 + DUT.d3*1000 + DUT.d2*100 + DUT.d1*10 + DUT.d0, 0);
+        check("adapter resetn held high",      DUT.VGA.resetn,   1);
 
         if (errors == 0) $display("\n*** ALL TESTS PASSED ***\n");
         else             $display("\n*** %0d TEST(S) FAILED ***\n", errors);
@@ -168,8 +212,8 @@ module testbench;
 
     // ---------------- watchdog ----------------
     initial begin
-        #1_000_000;   // 1 ms
-        $display("TIMEOUT: FSM never finished drawing (y_Q=%b)", DUT.y_Q);
+        #50_000_000;   // 50 ms
+        $display("TIMEOUT: FSM never finished (y_Q=%b)", DUT.y_Q);
         $stop;
     end
 
@@ -184,7 +228,7 @@ endmodule
 module vga_adapter (resetn, clock, color, x, y, write,
                     VGA_R, VGA_G, VGA_B, VGA_HS, VGA_VS,
                     VGA_BLANK_N, VGA_SYNC_N, VGA_CLK);
-    parameter RESOLUTION = "320x240";
+    parameter RESOLUTION = "640x480";
     parameter COLOR_DEPTH = 9;
 
     input        resetn, clock, write;
@@ -194,11 +238,11 @@ module vga_adapter (resetn, clock, color, x, y, write,
     output [7:0] VGA_R, VGA_G, VGA_B;
     output       VGA_HS, VGA_VS, VGA_BLANK_N, VGA_SYNC_N, VGA_CLK;
 
-    reg [8:0] fb [0:320*240-1];
+    reg [8:0] fb [0:640*480-1];
 
     always @(posedge clock)
-        if (resetn && write && x < 320 && y < 240)
-            fb[y*320 + x] <= color;
+        if (write && x < 640 && y < 480)
+            fb[y*640 + x] <= color;
 
     assign VGA_R = 8'd0;  assign VGA_G = 8'd0;  assign VGA_B = 8'd0;
     assign VGA_HS = 1'b1; assign VGA_VS = 1'b1;
