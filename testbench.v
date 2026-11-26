@@ -1,277 +1,278 @@
-`timescale 1ns / 1ps
-
-// ============================================================================
-//  testbench.v  --  ModelSim testbench for square_test
-//
-//  What it does:
-//    1. Fills the (stand-in) screen with old pixels, then resets with KEY[0]
-//       and checks that the whole screen is cleared to CLEAR_COLOR.
-//    2. Presses KEY[3] (go) to draw the 32x32 template and checks:
-//         - template pixels read by the FSM     (expect 32*32 = 1024)
-//         - pixels drawn                        (expect the non-transparent
-//                                                pixels of the template)
-//         - BCD counter digits d4..d0 and HEX4..HEX0 show that count
-//         - every drawn pixel lies inside the template area centred at
-//           (320,240) and has the template's color for that position
-//           (i.e. address, color and write are lined up)
-//    3. Resets again and checks the template is erased and the count is 0.
-//
-//  The real vga_adapter and object_mem use Altera megafunctions (altsyncram/
-//  altpll). By default this file provides lightweight behavioural stand-ins
-//  so you don't need the altera_mf library; the stand-in object_mem holds a
-//  test pattern instead of the MIF. To simulate with the real modules
-//  instead, compile with +define+USE_REAL_VGA, add object_mem.v and the
-//  vga_adapter files, and add the altera_mf library (vsim -L altera_mf_ver).
-// ============================================================================
-
+`timescale 1ns/1ps
+/*
+ * Self-checking testbench for the game FSM in square_test (ModelSim).
+ *
+ * It watches what square_test sends to the VGA adapter (dut.pixel_write / VGA_x / VGA_y /
+ * pixel_color) and the game state (dut.g_Q), and drives the switches and keys like a player.
+ * Only LEDR[8] (PASS) and LEDR[9] (FAIL) exist in this design, so the game state is read from dut.g_Q.
+ *
+ * Checks
+ *   - reset -> repaint -> S_ORDER
+ *   - KEY[3] with no shape switch up does nothing; KEY[2] in S_ORDER does nothing
+ *   - KEY[3] places the order and starts drawing
+ *   - drawn pixels stay inside the box, come from the selected ROM, and match the HEX counter
+ *   - KEY[3] in S_SUBMIT does nothing; KEY[2] submits
+ *   - placeholder grading: SW[9] up -> PASS (LEDR[8]), down -> FAIL (LEDR[9]),
+ *     and both LEDs are off outside S_RESULT even though the old grade is remembered
+ *   - KEY[2] and KEY[3] in S_RESULT do nothing; KEY[1] repaints the screen and returns to S_ORDER
+ *   - SW[1]+SW[2] both up -> shape 2 is drawn (priority)
+ *   - HOLDING a key down never runs the game through two steps (KEY[3], KEY[2], KEY[1] each held)
+ *   - KEY[0] resets from the middle of the game
+ *
+ * Run it from the folder that contains the ./MIF folder, otherwise the ROMs load empty.
+ */
 module testbench;
 
-    reg         CLOCK_50;
-    reg  [3:0]  KEY;
+    // ------------------------------------------------------------------ DUT hookup
+    reg         CLOCK_50 = 1'b0;
+    reg  [3:0]  KEY      = 4'b1111;      // active-low (1 = not pressed)
+    reg  [9:0]  SW       = 10'b0;
+    wire [9:0]  LEDR;
     wire [6:0]  HEX4, HEX3, HEX2, HEX1, HEX0;
     wire [7:0]  VGA_R, VGA_G, VGA_B;
     wire        VGA_HS, VGA_VS, VGA_BLANK_N, VGA_SYNC_N, VGA_CLK;
 
-    // ---------------- DUT ----------------
-    square_test DUT (
-        .CLOCK_50(CLOCK_50), .KEY(KEY),
+    square_test dut (
+        .CLOCK_50(CLOCK_50), .SW(SW), .KEY(KEY), .LEDR(LEDR),
         .HEX4(HEX4), .HEX3(HEX3), .HEX2(HEX2), .HEX1(HEX1), .HEX0(HEX0),
         .VGA_R(VGA_R), .VGA_G(VGA_G), .VGA_B(VGA_B),
         .VGA_HS(VGA_HS), .VGA_VS(VGA_VS), .VGA_BLANK_N(VGA_BLANK_N),
-        .VGA_SYNC_N(VGA_SYNC_N), .VGA_CLK(VGA_CLK)
-    );
+        .VGA_SYNC_N(VGA_SYNC_N), .VGA_CLK(VGA_CLK));
 
-    // ---------------- 50 MHz clock ----------------
-    initial CLOCK_50 = 1'b0;
-    always #10 CLOCK_50 = ~CLOCK_50;
+    always #10 CLOCK_50 = ~CLOCK_50;     // 50 MHz
 
-    // ---------------- expected values ----------------
-    localparam COLS        = 640;
-    localparam ROWS        = 480;
-    localparam SIZE        = 32;
-    localparam XC_CENTER   = 320;
-    localparam YC_CENTER   = 240;
-    localparam X0          = XC_CENTER - SIZE/2;   // top-left corner of template
-    localparam Y0          = YC_CENTER - SIZE/2;
-    localparam EXP_READS   = SIZE * SIZE;      // 1024
-    localparam ST_A = 3'b010, ST_D = 3'b101;   // FSM states (idle, done drawing)
-    integer    exp_drawn;                      // non-transparent template pixels
-    integer    k;
+    // ------------------------------------------------------------------ constants
+    localparam S_CLEAR = 0, S_ORDER = 1, S_DRAW = 2, S_SUBMIT = 3, S_RESULT = 4;
+    localparam NPIX = 76800;
+    localparam BOX_X0 = 128, BOX_X1 = 191, BOX_Y0 = 88, BOX_Y1 = 151;
 
-    initial begin
-        exp_drawn = 0;
-        for (k = 0; k < SIZE*SIZE; k = k + 1)
-            if (DUT.OM.mem[k] !== DUT.TRANSPARENT) exp_drawn = exp_drawn + 1;
-    end
-
-    // ---------------- monitors ----------------
-    integer read_count    = 0;
-    integer drawn_count   = 0;
-    integer clear_count   = 0;
-    integer bad_xy        = 0;
-    integer bad_color     = 0;
-    integer errors        = 0;
-
-    // pixels as the DUT drives them into the VGA adapter
-    wire [9:0] vga_x = DUT.VGA.x;
-    wire [8:0] vga_y = DUT.VGA.y;
-    wire [8:0] vga_c = DUT.VGA.color;
+    // ------------------------------------------------------------------ write monitor
+    integer n_repaint, n_draw, n_outside, n_wrong_rom;
+    integer ordered_id;                  // which ROM the test expects to be drawn (1..3)
+    integer errors;
+    reg     done = 1'b0;
+    reg [8:0] exp_color;
 
     always @(posedge CLOCK_50) begin
-        if (KEY[0] && DUT.write && !DUT.clearing) read_count = read_count + 1;
-
-        if (KEY[0] && DUT.VGA.write && DUT.VGA_clearing) begin
-            clear_count = clear_count + 1;
-            if (vga_c !== DUT.CLEAR_COLOR) bad_color = bad_color + 1;
-        end
-
-        if (KEY[0] && DUT.VGA.write && !DUT.VGA_clearing) begin
-            drawn_count = drawn_count + 1;
-
-            if ((^vga_x === 1'bx) || (^vga_y === 1'bx)) begin
-                if (bad_xy < 5)
-                    $display("[%0t] ERROR: unknown VGA coordinate x=%b y=%b", $time, vga_x, vga_y);
-                bad_xy = bad_xy + 1;
-            end
-            else if (vga_x < X0 || vga_x >= X0 + SIZE || vga_y < Y0 || vga_y >= Y0 + SIZE) begin
-                if (bad_xy < 5)
-                    $display("[%0t] ERROR: pixel (%0d,%0d) outside template area", $time, vga_x, vga_y);
-                bad_xy = bad_xy + 1;
-            end
-            else if (vga_c !== DUT.OM.mem[(vga_y - Y0) * SIZE + (vga_x - X0)]) begin
-                if (bad_color < 5)
-                    $display("[%0t] ERROR: pixel (%0d,%0d) color %h, template has %h", $time,
-                             vga_x, vga_y, vga_c, DUT.OM.mem[(vga_y - Y0) * SIZE + (vga_x - X0)]);
-                bad_color = bad_color + 1;
+        if (dut.pixel_write === 1'b1) begin
+            if (dut.VGA_clear === 1'b1) begin
+                n_repaint = n_repaint + 1;
+            end else begin
+                n_draw = n_draw + 1;
+                if (dut.VGA_x < BOX_X0 || dut.VGA_x > BOX_X1 ||
+                    dut.VGA_y < BOX_Y0 || dut.VGA_y > BOX_Y1) n_outside = n_outside + 1;
+                exp_color = (ordered_id == 1) ? dut.color1 :
+                            (ordered_id == 2) ? dut.color2 : dut.color3;
+                if (dut.pixel_color !== exp_color) n_wrong_rom = n_wrong_rom + 1;
             end
         end
     end
 
-    // number of screen pixels that are not CLEAR_COLOR
-    function integer dirty_pixels;
-        input dummy;
-        integer i;
-        begin
-            dirty_pixels = 0;
-            for (i = 0; i < COLS*ROWS; i = i + 1)
-                if (DUT.VGA.fb[i] !== DUT.CLEAR_COLOR) dirty_pixels = dirty_pixels + 1;
+    // ------------------------------------------------------------------ helpers
+    task check(input cond, input [8*80-1:0] msg);
+    begin
+        if (cond) $display("  ok:   %0s", msg);
+        else begin
+            errors = errors + 1;
+            $display("  FAIL: %0s", msg);
         end
-    endfunction
+    end
+    endtask
+
+    task zero_counters;
+    begin
+        n_repaint = 0; n_draw = 0; n_outside = 0; n_wrong_rom = 0;
+    end
+    endtask
+
+    task wait_cycles(input integer n);
+    begin
+        repeat (n) @(negedge CLOCK_50);
+    end
+    endtask
+
+    // press and release a key (k = 0..3), with a few idle cycles after
+    task tap(input integer k);
+    begin
+        @(negedge CLOCK_50); KEY[k] = 1'b0;
+        wait_cycles(3);
+        KEY[k] = 1'b1;
+        wait_cycles(3);
+    end
+    endtask
+
+    task wait_state(input integer s, input integer max_cycles);
+        integer t;
+    begin
+        t = 0;
+        while (dut.g_Q !== s && t < max_cycles) begin
+            @(negedge CLOCK_50); t = t + 1;
+        end
+        if (dut.g_Q !== s) begin
+            errors = errors + 1;
+            $display("  FAIL: never reached state %0d (stuck in %0d)", s, dut.g_Q);
+        end
+        wait_cycles(5);
+    end
+    endtask
 
     task do_reset;
-        begin
-            @(negedge CLOCK_50) KEY[0] = 1'b0;
-            repeat (5) @(posedge CLOCK_50);
-            @(negedge CLOCK_50) KEY[0] = 1'b1;
-            wait (DUT.y_Q == ST_A);           // screen clear finished
-            repeat (5) @(posedge CLOCK_50);
-        end
+    begin
+        @(negedge CLOCK_50); KEY[0] = 1'b0;
+        wait_cycles(5);
+        KEY[0] = 1'b1;
+        wait_state(S_ORDER, 200000);
+    end
     endtask
 
-    // ---------------- 7-segment decode for checking ----------------
-    function [6:0] seg;
-        input [3:0] h;
-        case (h)
-            4'h0: seg = 7'b1000000; 4'h1: seg = 7'b1111001;
-            4'h2: seg = 7'b0100100; 4'h3: seg = 7'b0110000;
-            4'h4: seg = 7'b0011001; 4'h5: seg = 7'b0010010;
-            4'h6: seg = 7'b0000010; 4'h7: seg = 7'b1111000;
-            4'h8: seg = 7'b0000000; 4'h9: seg = 7'b0011000;
-            default: seg = 7'b1111111;
-        endcase
-    endfunction
-
-    task check;
-        input [255:0] name;
-        input integer got, exp;
-        begin
-            if (got !== exp) begin
-                $display("  FAIL  %0s : got %0d, expected %0d", name, got, exp);
-                errors = errors + 1;
-            end else
-                $display("  PASS  %0s : %0d", name, got);
-        end
+    // set switches, tap KEY[3] to place the order, wait for the submit state
+    task order_and_draw(input [2:0] sw, input integer id);
+    begin
+        SW[2:0] = sw;
+        ordered_id = id;
+        zero_counters;
+        tap(3);
+        check(dut.g_Q === S_DRAW, "order placed: game is drawing");
+        wait_state(S_SUBMIT, 50000);
+        check(n_draw > 0,          "something was drawn (if not: check the MIF paths)");
+        check(n_outside == 0,      "all shape pixels are inside the 64x64 box");
+        check(n_wrong_rom == 0,    "every pixel came from the ordered shape's ROM");
+        check(dut.d4*10000 + dut.d3*1000 + dut.d2*100 + dut.d1*10 + dut.d0 == n_draw,
+                                   "HEX counter equals number of pixels drawn");
+    end
     endtask
 
-    // ---------------- stimulus ----------------
+    // ------------------------------------------------------------------ test sequence
+    integer draw_before;
+
     initial begin
-        KEY = 4'b1111;              // all keys released (active-low)
+        errors = 0; ordered_id = 1;
+        zero_counters;
+        $display("=== game FSM testbench ===");
+        wait_cycles(3);
 
-        // pretend an old picture is on the screen (e.g. an object drawn before reset)
-        for (k = 0; k < COLS*ROWS; k = k + 1) DUT.VGA.fb[k] = 9'h1FF;
-
-        // ---- reset: whole screen must be cleared ----
-        $display("[%0t] Pressing KEY[0] (reset)", $time);
+        // ---- 1. reset ------------------------------------------------------------
+        $display("[1] reset -> repaint -> ORDER");
         do_reset;
-        $display("\n=========== RESET 1 ===========");
-        check("screen pixels cleared",         clear_count,      COLS*ROWS);
-        check("pixels left uncleared",         dirty_pixels(0),  0);
-        check("pixel count after reset",
-              DUT.d4*10000 + DUT.d3*1000 + DUT.d2*100 + DUT.d1*10 + DUT.d0, 0);
+        check(n_repaint == NPIX, "repaint wrote exactly 76800 pixels");
+        check(n_draw == 0,       "no shape pixels during the repaint");
+        check(dut.g_Q === S_ORDER, "game is in S_ORDER");
+        check(LEDR[9:8] === 2'b00, "PASS/FAIL LEDs are off after reset");
 
-        // ---- draw the template ----
-        $display("[%0t] Pressing KEY[3] to draw template", $time);
-        @(negedge CLOCK_50) KEY[3] = 1'b0;
-        repeat (3) @(posedge CLOCK_50);
-        @(negedge CLOCK_50) KEY[3] = 1'b1;
-        wait (DUT.y_Q == ST_D);
-        wait (DUT.y_Q == ST_A);
-        repeat (5) @(posedge CLOCK_50);
-        $display("[%0t] Drawing finished", $time);
+        // ---- 2. ignored keys while ordering ----------------------------------------
+        $display("[2] keys that should be ignored while ordering");
+        SW[2:0] = 3'b000;
+        tap(3);
+        check(dut.g_Q === S_ORDER, "KEY[3] with no shape selected does nothing");
+        SW[2:0] = 3'b010;
+        tap(2);
+        check(dut.g_Q === S_ORDER, "KEY[2] while ordering does nothing");
 
-        $display("\n=========== DRAW ===========");
-        check("template pixels read",          read_count,    EXP_READS);
-        check("pixels drawn",                  drawn_count,   exp_drawn);
-        check("BCD value d4..d0",
-              DUT.d4*10000 + DUT.d3*1000 + DUT.d2*100 + DUT.d1*10 + DUT.d0,
-              exp_drawn);
-        check("HEX4 segments ok", HEX4 === seg(exp_drawn / 10000 % 10), 1);
-        check("HEX3 segments ok", HEX3 === seg(exp_drawn / 1000 % 10), 1);
-        check("HEX2 segments ok", HEX2 === seg(exp_drawn / 100 % 10), 1);
-        check("HEX1 segments ok", HEX1 === seg(exp_drawn / 10 % 10), 1);
-        check("HEX0 segments ok", HEX0 === seg(exp_drawn % 10), 1);
-        check("bad/unknown VGA coordinates",   bad_xy,        0);
-        check("pixels with wrong color",       bad_color,     0);
-        check("template pixels on screen",     dirty_pixels(0), exp_drawn);
+        // ---- 3. round A: order shape 2, PASS ---------------------------------------
+        $display("[3] round A: order shape2, then submit with SW[9] up (PASS)");
+        order_and_draw(3'b010, 2);
+        check(dut.g_Q === S_SUBMIT, "game is waiting in S_SUBMIT");
+        check(LEDR[9:8] === 2'b00, "PASS/FAIL LEDs are off before submitting");
+        draw_before = n_draw;
+        tap(3);
+        check(dut.g_Q === S_SUBMIT, "KEY[3] in S_SUBMIT does nothing");
+        check(n_draw == draw_before, "nothing more was drawn");
+        SW[9] = 1'b1;
+        tap(2);
+        check(dut.g_Q === S_RESULT, "KEY[2] submits -> S_RESULT");
+        check(LEDR[8] === 1'b1 && LEDR[9] === 1'b0, "result is PASS (LEDR[8] on, LEDR[9] off)");
+        tap(2);
+        check(dut.g_Q === S_RESULT, "KEY[2] in S_RESULT does nothing");
+        tap(3);
+        check(dut.g_Q === S_RESULT, "KEY[3] in S_RESULT does nothing");
 
-        // ---- reset again: template must be erased ----
-        $display("[%0t] Pressing KEY[0] (reset)", $time);
-        clear_count = 0;
+        // ---- 4. next order -> repaint ------------------------------------------------
+        $display("[4] KEY[1] in RESULT repaints and goes back to ORDER");
+        zero_counters;
+        tap(1);
+        check(dut.g_Q === S_CLEAR, "game went to S_CLEAR");
+        wait_state(S_ORDER, 200000);
+        check(n_repaint == NPIX, "repaint wrote exactly 76800 pixels");
+        check(n_draw == 0,       "no shape pixels during the repaint");
+        check(dut.grade === 1'b1, "the old grade (PASS) is still remembered");
+        check(LEDR[9:8] === 2'b00, "but the LEDs are off outside S_RESULT");
+
+        // ---- 5. round B: shape 3, FAIL ---------------------------------------------
+        $display("[5] round B: order shape3, then submit with SW[9] down (FAIL)");
+        SW[9] = 1'b0;
+        order_and_draw(3'b100, 3);
+        SW[9] = 1'b0;
+        tap(2);
+        check(dut.g_Q === S_RESULT, "KEY[2] submits -> S_RESULT");
+        check(LEDR[9] === 1'b1 && LEDR[8] === 1'b0, "result is FAIL (LEDR[9] on, LEDR[8] off)");
+        zero_counters;
+        tap(1);
+        wait_state(S_ORDER, 200000);
+        check(n_repaint == NPIX, "repaint wrote exactly 76800 pixels");
+
+        // ---- 6. priority -------------------------------------------------------------
+        $display("[6] SW[1]+SW[2] both up: shape2 is drawn");
+        order_and_draw(3'b110, 2);
+        check(n_wrong_rom == 0, "shape2 was drawn (SW[1] beats SW[2])");
+        tap(2);                                    // submit (SW[9] is down -> FAIL)
+        zero_counters;
+        tap(1);                                    // next order
+        wait_state(S_ORDER, 200000);
+        check(n_repaint == NPIX, "repaint wrote exactly 76800 pixels");
+
+        // ---- 7. holding keys down ----------------------------------------------------
+        $display("[7] holding each key down must not run through two steps");
+        SW[2:0] = 3'b001;
+        ordered_id = 1;
+        zero_counters;
+        KEY[3] = 1'b0;                             // hold KEY[3] through the whole drawing
+        wait_state(S_SUBMIT, 50000);
+        wait_cycles(3000);
+        check(dut.g_Q === S_SUBMIT, "KEY[3] held: game waits in S_SUBMIT");
+        check(n_draw > 0 && n_draw <= 4096, "KEY[3] held: the shape was drawn only once");
+        check(dut.d4*10000 + dut.d3*1000 + dut.d2*100 + dut.d1*10 + dut.d0 == n_draw,
+                                    "HEX counter equals number of pixels drawn");
+        KEY[3] = 1'b1;
+        wait_cycles(5);
+        KEY[2] = 1'b0;                             // hold KEY[2] (submit)
+        wait_cycles(3000);
+        check(dut.g_Q === S_RESULT, "KEY[2] held: game waits in S_RESULT");
+        KEY[2] = 1'b1;
+        wait_cycles(5);
+        zero_counters;
+        KEY[1] = 1'b0;                             // hold KEY[1] longer than the whole repaint
+        wait_cycles(100000);
+        check(dut.g_Q === S_ORDER, "KEY[1] held: repaint finished and game waits in S_ORDER");
+        check(n_repaint == NPIX,   "KEY[1] held: repaint ran exactly once (76800 pixels)");
+        check(n_draw == 0,         "KEY[1] held: nothing was drawn");
+        KEY[1] = 1'b1;
+        wait_cycles(5);
+
+        // ---- 7. reset from the middle of the game -----------------------------------
+        $display("[8] KEY[0] resets from S_SUBMIT");
+        order_and_draw(3'b001, 1);
+        SW[2:0] = 3'b000;
+        zero_counters;
         do_reset;
-        $display("\n=========== RESET 2 ===========");
-        check("screen pixels cleared",         clear_count,      COLS*ROWS);
-        check("pixels left uncleared",         dirty_pixels(0),  0);
-        check("pixel count after reset",
-              DUT.d4*10000 + DUT.d3*1000 + DUT.d2*100 + DUT.d1*10 + DUT.d0, 0);
-        check("adapter resetn held high",      DUT.VGA.resetn,   1);
+        check(dut.g_Q === S_ORDER, "back in S_ORDER after reset");
+        check(n_repaint == NPIX,   "reset repainted the screen");
+        check(LEDR[8] === 1'b0 && LEDR[9] === 1'b0, "result was cleared");
 
-        if (errors == 0) $display("\n*** ALL TESTS PASSED ***\n");
-        else             $display("\n*** %0d TEST(S) FAILED ***\n", errors);
+        // ---- summary ---------------------------------------------------------------
+        $display("=============================");
+        if (errors == 0) $display("ALL TESTS PASSED");
+        else             $display("%0d CHECK(S) FAILED", errors);
+        done = 1'b1;
         $stop;
     end
 
-    // ---------------- watchdog ----------------
+    // safety net in case something hangs
     initial begin
-        #50_000_000;   // 50 ms
-        $display("TIMEOUT: FSM never finished (y_Q=%b)", DUT.y_Q);
-        $stop;
+        #400_000_000;
+        if (!done) begin
+            $display("TIMEOUT - simulation took too long");
+            $stop;
+        end
     end
 
 endmodule
-
-
-`ifndef USE_REAL_VGA
-// ============================================================================
-//  Behavioural stand-in for vga_adapter (simulation only).
-//  Same ports as the DE1-SoC vga_adapter; records writes into a frame buffer.
-// ============================================================================
-module vga_adapter (resetn, clock, color, x, y, write,
-                    VGA_R, VGA_G, VGA_B, VGA_HS, VGA_VS,
-                    VGA_BLANK_N, VGA_SYNC_N, VGA_CLK);
-    parameter RESOLUTION = "640x480";
-    parameter COLOR_DEPTH = 9;
-
-    input        resetn, clock, write;
-    input  [8:0] color;
-    input  [9:0] x;
-    input  [8:0] y;
-    output [7:0] VGA_R, VGA_G, VGA_B;
-    output       VGA_HS, VGA_VS, VGA_BLANK_N, VGA_SYNC_N, VGA_CLK;
-
-    reg [8:0] fb [0:640*480-1];
-
-    always @(posedge clock)
-        if (write && x < 640 && y < 480)
-            fb[y*640 + x] <= color;
-
-    assign VGA_R = 8'd0;  assign VGA_G = 8'd0;  assign VGA_B = 8'd0;
-    assign VGA_HS = 1'b1; assign VGA_VS = 1'b1;
-    assign VGA_BLANK_N = 1'b1; assign VGA_SYNC_N = 1'b0;
-    assign VGA_CLK = clock;
-endmodule
-
-// ============================================================================
-//  Behavioural stand-in for object_mem (simulation only).
-//  Same ports and 1-clock read latency as the altsyncram ROM in object_mem.v.
-//  Instead of the MIF it holds a test pattern in which every 5th pixel is
-//  transparent (0) and the others have a color that depends on the address.
-// ============================================================================
-module object_mem (address, clock, q);
-    parameter n = 9;
-    parameter Mn = 10;
-    parameter INIT_FILE = "";
-
-    input  wire [Mn-1:0] address;
-    input  wire clock;
-    output reg  [n-1:0] q;
-
-    reg [n-1:0] mem [0:(1<<Mn)-1];
-    integer i;
-    initial
-        for (i = 0; i < (1<<Mn); i = i + 1)
-            mem[i] = (i % 5 == 0) ? {n{1'b0}} : ((i * 37) % ((1<<n) - 1)) + 1;
-
-    always @(posedge clock)
-        q <= mem[address];
-endmodule
-`endif
